@@ -1,0 +1,99 @@
+--This text file contains the SQL command to create tables in Oracle Apex
+--After creating each table, load the respective data (.csv) into Oracle Apex
+
+CREATE TABLE customers (
+    customer_id VARCHAR2(50) PRIMARY KEY,
+    customer_unique_id VARCHAR2(50) NOT NULL,
+    customer_zip_code_prefix VARCHAR2(5) NOT NULL,
+    customer_city VARCHAR2(100),
+    customer_state VARCHAR2(2)
+);
+--load customers.csv after creating customers table
+
+CREATE TABLE seller (
+    seller_id VARCHAR2(50) PRIMARY KEY,
+    seller_zip_code_prefix NUMBER(5),
+    seller_city VARCHAR2(100),
+    seller_state VARCHAR2(2)
+);
+--load seller.csv after creating seller table
+
+CREATE TABLE products (
+    product_id VARCHAR2(50) PRIMARY KEY,
+    product_category_name VARCHAR2(100),
+    product_name_length NUMBER,
+    product_description_length NUMBER,
+    product_photos_qty NUMBER,
+    product_weight_g NUMBER,
+    product_length_cm NUMBER,
+    product_height_cm NUMBER,
+    product_width_cm NUMBER
+);
+--load products.csv after creating products table
+
+CREATE TABLE orders (
+    order_id VARCHAR2(50) PRIMARY KEY,
+    customer_id VARCHAR2(50),
+    order_status VARCHAR2(50),
+    order_purchase_timestamp TIMESTAMP,
+    order_approved_at TIMESTAMP,
+    order_delivered_carrier_date TIMESTAMP,
+    order_delivered_customer_date TIMESTAMP,
+    order_estimated_delivery_date TIMESTAMP,
+    CONSTRAINT fk_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customers(customer_id)
+);
+--load orders.csv after creating orders table
+
+CREATE TABLE order_items (
+    order_id VARCHAR2(50) NOT NULL,
+    order_item_id NUMBER NOT NULL,
+    product_id VARCHAR2(50) NOT NULL,
+    seller_id VARCHAR2(50) NOT NULL,
+    shipping_limit_date TIMESTAMP,
+    price NUMBER,
+    freight_value NUMBER,
+    CONSTRAINT pk_order_items PRIMARY KEY (order_id, order_item_id),
+    CONSTRAINT fk_order_items_orders FOREIGN KEY (order_id)
+        REFERENCES orders(order_id),
+    CONSTRAINT fk_order_items_products FOREIGN KEY (product_id)
+        REFERENCES products(product_id),
+    CONSTRAINT fk_order_items_sellers FOREIGN KEY (seller_id)
+        REFERENCES seller(seller_id)
+);
+--load order_item.csv after creating order_items table
+
+CREATE TABLE payments (
+    order_id VARCHAR2(50) NOT NULL,
+    payment_sequential NUMBER NOT NULL,
+    payment_type VARCHAR2(30),
+    payment_installments NUMBER,
+    payment_value NUMBER,
+    CONSTRAINT pk_payments PRIMARY KEY (order_id, payment_sequential),
+    CONSTRAINT fk_payments_orders FOREIGN KEY (order_id)
+        REFERENCES orders(order_id)
+);
+--load payments.csv after creating payments table
+
+CREATE TABLE reviews (
+    review_id VARCHAR2(50) PRIMARY KEY,
+    order_id VARCHAR2(50) NOT NULL,
+    review_score NUMBER,
+    review_comment_title VARCHAR2(4000),
+    review_comment_message VARCHAR2(4000),
+    review_creation_date TIMESTAMP,
+    review_answer_timestamp TIMESTAMP,
+    CONSTRAINT fk_reviews_orders FOREIGN KEY (order_id)
+        REFERENCES orders(order_id)
+);
+--load reviews.csv after creating reviews table
+
+
+
+
+
+
+
+
+ 

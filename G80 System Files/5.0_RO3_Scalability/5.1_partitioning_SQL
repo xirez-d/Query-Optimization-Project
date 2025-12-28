@@ -1,0 +1,62 @@
+-- ============================================================================
+-- RO3: PARTITIONING IMPLEMENTATION SCRIPT
+-- ============================================================================
+-- This script contains SQL statements to implement table partitioning in Oracle Apex
+-- for Research Objective 3 (RO3): Scalability Testing.
+--
+-- IMPORTANT NOTES:
+-- 1. This script demonstrates an ATTEMPTED partitioning strategy that encountered
+--    table quota limitations in Oracle Apex (free tier).
+-- 3. Run statements one at a time and monitor resource usage.
+-- ============================================================================
+
+-- ============================================================================
+-- STEP 1: CLEAN UP IRRELEVANT TABLES (Initial Setup)
+-- ============================================================================
+-- Purpose: Free up space by removing unnecessary tables before attempting partitioning
+
+-- Drop tables that are not needed for partitioning tests
+DROP TABLE reviews;
+DROP TABLE payments;
+DROP TABLE products;
+DROP TABLE seller;
+
+-- ============================================================================
+-- STEP 2: CREATE SINGLE-PARTITION ORDERS TABLE
+-- ============================================================================
+-- Purpose: Test partitioning on orders table using order_purchase_timestamp as partition key
+
+CREATE TABLE orders_test_partition
+PARTITION BY RANGE (order_purchase_timestamp)
+(
+    -- Create a single partition that holds all data
+    -- MAXVALUE ensures all timestamp values are included
+    PARTITION p_everything VALUES LESS THAN (MAXVALUE)
+) AS SELECT * FROM orders;
+
+-- ============================================================================
+-- STEP 3: CHECK STORAGE USAGE OF ORIGINAL VS PARTITIONED TABLES
+-- ============================================================================
+-- Purpose: Compare storage consumption between original table and partitioned version
+
+SELECT 
+  segment_name,
+  ROUND(bytes/1024/1024, 2) as size_mb,  -- Convert bytes to megabytes
+  segment_type
+FROM user_segments 
+WHERE segment_name IN ('ORDERS', 'ORDERS_TEST_PARTITION')
+ORDER BY bytes DESC;  -- Show largest table first
+
+-- ============================================================================
+-- STEP 4: ATTEMPT TO CREATE PARTITIONED ORDER_ITEMS TABLE (FAILED DUE TO QUOTA)
+-- ============================================================================
+-- Purpose: Extend partitioning to order_items table to test multi-table partitioning
+-- Problem: This operation failed due to Oracle Apex table quota limitations
+-- Error: Insufficient quota to create the partitioned table
+
+CREATE TABLE order_items_test_partition
+PARTITION BY RANGE (shipping_limit_date)
+(
+    -- Attempt to create a single partition for all shipping dates
+    PARTITION p_all VALUES LESS THAN (MAXVALUE)
+) AS SELECT * FROM order_items;

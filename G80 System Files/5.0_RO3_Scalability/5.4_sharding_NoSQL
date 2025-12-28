@@ -1,0 +1,249 @@
+// ============================================================================
+// RO3: MONGODB SCALABILITY TESTING SCRIPT
+// ============================================================================
+// This script tests MongoDB performance for Research Objective 3 (RO3): Scalability
+// It covers baseline performance metrics and sharding configuration
+// Make sure to switch to the "Olist" database before running the script 
+// ============================================================================
+
+// Clear any existing indexes (except _id)
+db.orders.dropIndexes();
+db.orders_item.dropIndexes();
+db.customers.dropIndexes();
+
+// Create fresh indexes for RO3 testing
+db.orders.createIndex({ "order_purchase_timestamp": 1 });  // Index for date range queries
+db.orders.createIndex({ "customer_id": 1 });               // Index for customer lookups
+db.orders_item.createIndex({ "order_id": 1 });             // Index for joining with orders
+db.orders_item.createIndex({ "product_id": 1 });           // Index for product lookups
+db.customers.createIndex({ "customer_id": 1 });            // Primary key index for customers
+
+// Verify
+print("Indexes created successfully!");
+print("Orders indexes:");
+db.orders.getIndexes().forEach(idx => printjson(idx.key));
+
+print("=== ALL INDEXES ===");
+
+print("Orders indexes:");
+db.orders.getIndexes().forEach(idx => print("  • " + JSON.stringify(idx.key)));
+
+print("\nOrders_item indexes:");  // Note: Collection name is orders_item (not order_items)
+db.orders_item.getIndexes().forEach(idx => print("  • " + JSON.stringify(idx.key)));
+
+print("\nCustomers indexes:");
+db.customers.getIndexes().forEach(idx => print("  • " + JSON.stringify(idx.key)));
+
+print("=== CONVERTING STRING DATES TO ISODate ===");
+print("Starting conversion...");
+
+var converted = 0;
+var total = db.orders.count();
+
+db.orders.find().forEach(function(doc) {
+  try {
+    var dateStr = doc.order_purchase_timestamp;
+    
+    // Handle format: "2017-04-11 12:22:08"
+    // MongoDB understands this format directly
+    var dateObj = new Date(dateStr);
+    
+    // Update if valid date
+    if (dateObj instanceof Date && !isNaN(dateObj)) {
+      db.orders.updateOne(
+        { _id: doc._id },
+        { $set: { order_purchase_timestamp: dateObj } }
+      );
+      converted++;
+    }
+    
+    // Progress update every 1000 documents
+    if (converted % 1000 === 0) {
+      print("Converted " + converted + "/" + total + " documents...");
+    }
+  } catch(e) {
+    print("Error converting document " + doc._id + ": " + e.message);
+  }
+});
+
+print("Conversion complete!");
+print("Converted " + converted + " of " + total + " documents to ISODate");
+
+// Verify conversion
+print("\n=== VERIFICATION ===");
+var sample = db.orders.findOne();
+print("Sample after conversion: " + sample.order_purchase_timestamp);
+print("Type now: " + typeof sample.order_purchase_timestamp);
+print("Is Date object? " + (sample.order_purchase_timestamp instanceof Date));
+
+print("=".repeat(70));
+
+print("RO3 BASELINE TEST - MONGODB (NO SHARDING)");
+print("=".repeat(70));
+
+// ==================== 1. STORAGE OVERHEAD ====================
+// Calculates storage metrics to compare with Oracle database performance
+print("\n 1. STORAGE OVERHEAD");
+
+var ordersStats = db.orders.stats();
+var itemsStats = db.orders_item.stats();
+
+// Debug: Show available fields (optional)
+// print("Orders fields: " + Object.keys(ordersStats).join(", "));
+// print("Items fields: " + Object.keys(itemsStats).join(", "));
+
+// A. ACTUAL DATA SIZE (uncompressed, comparable to Oracle's 2MB)
+var ordersDataMB = ordersStats.size / 1024 / 1024;          // Uncompressed data
+var itemsDataMB = itemsStats.size / 1024 / 1024;
+var totalDataMB = ordersDataMB + itemsDataMB;
+
+// B. ALLOCATED STORAGE (data + padding + overhead)
+var ordersStorageMB = ordersStats.storageSize / 1024 / 1024; // Disk space allocated
+var itemsStorageMB = itemsStats.storageSize / 1024 / 1024;
+var totalStorageMB = ordersStorageMB + itemsStorageMB;
+
+// C. INDEX SIZE
+var ordersIndexMB = ordersStats.totalIndexSize ? ordersStats.totalIndexSize / 1024 / 1024 : 0;
+var itemsIndexMB = itemsStats.totalIndexSize ? itemsStats.totalIndexSize / 1024 / 1024 : 0;
+var totalIndexMB = ordersIndexMB + itemsIndexMB;
+
+// D. TOTAL WITH INDEXES (what Oracle's 8MB includes)
+var ordersTotalMB = ordersStorageMB + ordersIndexMB;
+var itemsTotalMB = itemsStorageMB + itemsIndexMB;
+var totalWithIndexesMB = ordersTotalMB + itemsTotalMB;
+
+print("   • A. Raw Data (uncompressed):");
+print("     - Orders: " + ordersDataMB.toFixed(2) + " MB");
+print("     - Order Items: " + itemsDataMB.toFixed(2) + " MB");
+print("     - Total Data: " + totalDataMB.toFixed(2) + " MB");
+
+print("\n   • B. Allocated Storage (data + overhead):");
+print("     - Orders: " + ordersStorageMB.toFixed(2) + " MB");
+print("     - Order Items: " + itemsStorageMB.toFixed(2) + " MB");
+print("     - Total Allocated: " + totalStorageMB.toFixed(2) + " MB");
+
+print("\n   • C. Index Storage:");
+print("     - Orders Indexes: " + ordersIndexMB.toFixed(2) + " MB");
+print("     - Items Indexes: " + itemsIndexMB.toFixed(2) + " MB");
+print("     - Total Indexes: " + totalIndexMB.toFixed(2) + " MB");
+
+print("\n   • D. Total with Indexes (compare with Oracle's 8MB):");
+print("     - Orders Total: " + ordersTotalMB.toFixed(2) + " MB");
+print("     - Items Total: " + itemsTotalMB.toFixed(2) + " MB");
+print("     - Grand Total: " + totalWithIndexesMB.toFixed(2) + " MB");
+
+// ==================== 2. QUERY RESPONSE TIME ====================
+// Measures performance of a complex JOIN query with date filtering
+print("\n 2. QUERY RESPONSE TIME");
+
+var queryStart = new Date();
+var result = db.orders.aggregate([
+  { $match: { 
+    "order_purchase_timestamp": { 
+      $gte: ISODate("2018-01-01"),
+      $lt: ISODate("2018-04-01")
+    }
+  }},
+  { $lookup: {
+    from: "orders_item",
+    localField: "order_id",
+    foreignField: "order_id",
+    as: "items"
+  }},
+  { $project: {
+    order_id: 1,
+    item_count: { $size: "$items" }
+  }}
+]).toArray();
+var queryEnd = new Date();
+var responseTime = queryEnd - queryStart;
+
+print("   • Query: JOIN (orders + items)");
+print("   • Response Time: " + responseTime + " ms");
+print("   • Orders Processed: " + result.length);
+if (result.length > 0) {
+  print("   • Sample: Order " + result[0].order_id + " has " + result[0].item_count + " items");
+}
+
+// ==================== 3. DATA DISTRIBUTION ====================
+// Shows current MongoDB deployment configuration
+print("\n 3. DATA DISTRIBUTION");
+print("   • Collections: 2 (orders + orders_item)");
+print("   • Sharding Status: Disabled");
+print("   • Shards Used: 1 (single instance)");
+
+// ==================== 4. INDEX EFFICIENCY ====================
+// Analyzes how effectively indexes are being used
+print("\n4. INDEX EFFICIENCY");
+
+var explain = db.orders.find({
+  "order_purchase_timestamp": {
+    $gte: ISODate("2018-01-01"),
+    $lt: ISODate("2018-04-01")
+  }
+}).explain("executionStats");
+
+var docsExamined = explain.executionStats.totalDocsExamined;
+var totalDocs = db.orders.count();
+var efficiency = (docsExamined / totalDocs) * 100;
+
+print("   • Documents Examined: " + docsExamined + " / " + totalDocs);
+print("   • Efficiency: " + efficiency.toFixed(1) + "% of collection");
+print("   • Index Used: " + (explain.executionStats.executionStages.inputStage ? 
+      "✓ " + explain.executionStats.executionStages.inputStage.indexName : "✗ None"));
+
+// ==================== SUMMARY ====================
+// Final comparison table for RO3 baseline results
+print("\n" + "=".repeat(70));
+print("RO3 BASELINE SUMMARY - MONGODB");
+print("=".repeat(70));
+print("Metric                    | Result");
+print("--------------------------|----------------------");
+print("Data Size (Uncompressed)  | " + totalDataMB.toFixed(2) + " MB");
+print("Disk Usage (Compressed)   | " + totalStorageMB.toFixed(2) + " MB"); 
+print("Index Storage             | " + totalIndexMB.toFixed(2) + " MB");   
+print("Total with Indexes        | " + totalWithIndexesMB.toFixed(2) + " MB");
+print("Query Response Time       | " + responseTime + " ms");
+print("Data Distribution         | 1 shard (no sharding)");
+print("Index Efficiency          | " + efficiency.toFixed(1) + "% examined");
+print("Collections               | 2 (orders + orders_item)");
+print("=".repeat(70));
+
+print("RO3 SHARDING TEST - ATTEMPTING HORIZONTAL SCALING");
+print("=".repeat(70));
+
+print("1. ATTEMPTING TO ENABLE SHARDING...\n");
+
+try {
+  // Check if sharding commands are available
+  // Sharding requires MongoDB cluster configuration, not standalone
+  if (typeof sh === 'undefined') {
+    throw new Error("Sharding commands not available. MongoDB might be standalone.");
+  }
+  
+  sh.enableSharding("Olist");
+  print("   Sharding enabled on 'Olist' database");
+  
+  // Hashed sharding provides even distribution across shards
+  sh.shardCollection("Olist.orders", { "customer_id": "hashed" });
+  print("   'orders' collection sharded (customer_id hashed)");
+  
+  sh.shardCollection("Olist.orders_item", { "order_id": "hashed" });
+  print("   'orders_item' collection sharded (order_id hashed)");
+  
+  print("\n2. SHARDING STATUS:");
+  print("   • Database: Olist");
+  print("   • Collections sharded: 2");
+  print("   • Shard key: customer_id (orders), order_id (items)");
+  print("   • Status: Configured for horizontal scaling");
+  
+  print("\n SHARDING CONFIGURED SUCCESSFULLY");
+  print("   Note: Actual sharding requires multiple MongoDB instances.");
+  print("   This config will distribute data when cluster is available.");
+  
+} catch(e) {
+  print("\n SHARDING FAILED: " + e.message); }
+
+print("\n" + "=".repeat(70));
+print("RO3 SHARDING TEST COMPLETE");
+print("=".repeat(70));

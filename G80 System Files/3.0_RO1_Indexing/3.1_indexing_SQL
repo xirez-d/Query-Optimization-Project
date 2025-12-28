@@ -1,0 +1,570 @@
+-- ====================================================================
+-- RO1: INDEXING ANALYSIS SCRIPT
+-- ====================================================================
+-- This script contains SQL statements for implementing and testing
+-- indexing strategies (B-Tree and Composite) in Oracle Apex.
+-- IMPORTANT: Run only one statement or block at a time.
+-- ====================================================================
+
+
+-- ====================================================================
+-- PART 1: B-TREE INDEX ANALYSIS
+-- ====================================================================
+
+-- Step 1: Check order_status distribution to understand selectivity patterns
+    order_status,
+    COUNT(*) AS cnt,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM orders), 2) AS pct
+FROM orders
+GROUP BY order_status
+ORDER BY cnt DESC;
+
+-- Step 2: Create table to store query timing results
+CREATE TABLE query_timing (
+    query_name      VARCHAR2(50),    -- Name of the query/test
+    test_case       VARCHAR2(50),    -- Specific test scenario (e.g., status value)
+    rows_returned   NUMBER,          -- Number of rows returned by query
+    elapsed_seconds NUMBER,          -- Execution time in seconds
+    run_time        TIMESTAMP DEFAULT SYSTIMESTAMP  -- Timestamp of execution
+);
+
+-- Step 3: Run baseline timing tests (BEFORE creating any indexes)
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_count NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Procedure to execute and time a single query
+    PROCEDURE run_status_query(p_status VARCHAR2) IS
+    BEGIN
+        v_start := SYSTIMESTAMP;
+
+        -- Count rows for this order status (representative query pattern)
+        SELECT COUNT(*)
+        INTO v_count
+        FROM orders
+        WHERE order_status = p_status;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds for easier analysis
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert results into query_timing table for later analysis
+        INSERT INTO query_timing (query_name, test_case, rows_returned, elapsed_seconds)
+        VALUES ('baseline_btree', p_status, v_count, v_seconds);
+    END;
+
+BEGIN
+    -- High selectivity (small result set) - 'delivered' status
+    run_status_query('delivered');
+
+    -- Medium selectivity (moderate result set) - 'shipped' status
+    run_status_query('shipped');
+
+    -- Low selectivity (large result set) - 'processing' status
+    run_status_query('processing');
+
+    COMMIT;  -- Save all timing results
+END;
+/
+
+-- Step 4: Check baseline query response times
+SELECT * 
+FROM query_timing
+ORDER BY elapsed_seconds DESC;
+
+-- Step 5: Create table to store query throughput results
+-- Throughput measures how many queries can be processed per second
+CREATE TABLE query_throughput (
+    query_name      VARCHAR2(50),    -- Name of the query/test
+    test_case       VARCHAR2(50),    -- Specific test scenario
+    total_queries   NUMBER,          -- Total queries executed
+    elapsed_seconds NUMBER,          -- Total execution time in seconds
+    queries_per_sec NUMBER,          -- Throughput: queries per second
+    run_time        TIMESTAMP DEFAULT SYSTIMESTAMP  -- Timestamp of execution
+);
+
+-- Step 6: Run repeated queries to measure baseline throughput (no index)
+-- This simulates real-world usage patterns with repeated queries
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_total_queries NUMBER := 1000; -- Number of times to repeat each query
+    v_status VARCHAR2(50);
+    v_count NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Procedure to execute queries repeatedly for throughput testing
+    PROCEDURE run_throughput_query(p_status VARCHAR2) IS
+    BEGIN
+        v_status := p_status;
+        v_start := SYSTIMESTAMP;
+
+        -- Execute the query multiple times to measure throughput
+        FOR i IN 1..v_total_queries LOOP
+            -- Count rows for this order_status each iteration
+            SELECT COUNT(*)
+            INTO v_count
+            FROM orders
+            WHERE order_status = v_status;
+        END LOOP;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert throughput results
+        INSERT INTO query_throughput (query_name, test_case, total_queries, elapsed_seconds, queries_per_sec)
+        VALUES ('baseline_order_status', v_status, v_total_queries, v_seconds, v_total_queries / v_seconds);
+    END;
+
+BEGIN
+    -- Test throughput for different selectivity levels
+    run_throughput_query('delivered');  -- High selectivity
+    run_throughput_query('shipped');    -- Medium selectivity
+    run_throughput_query('processing'); -- Low selectivity
+
+    COMMIT;  -- Save throughput results
+END;
+/
+
+-- Step 7: Check baseline throughput results
+SELECT *
+FROM query_throughput
+ORDER BY queries_per_sec DESC;
+
+-- Step 8: Create B-tree index on order_status column
+CREATE INDEX idx_orders_status
+ON orders(order_status);
+
+-- Step 9: Run timing tests AGAIN (now WITH the index)
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_count NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Same procedure as before, but now with index in place
+    PROCEDURE run_status_query(p_status VARCHAR2) IS
+    BEGIN
+        v_start := SYSTIMESTAMP;
+
+        -- Count rows for this order status (now using index)
+        SELECT COUNT(*)
+        INTO v_count
+        FROM orders
+        WHERE order_status = p_status;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert results with different query_name to distinguish from baseline
+        INSERT INTO query_timing (query_name, test_case, rows_returned, elapsed_seconds)
+        VALUES ('btree_orders_status', p_status, v_count, v_seconds);
+    END;
+
+BEGIN
+    -- Test same scenarios with the index
+    run_status_query('delivered');   -- High selectivity
+    run_status_query('shipped');     -- Medium selectivity
+    run_status_query('processing');  -- Low selectivity
+
+    COMMIT;
+END;
+/
+
+-- Step 10: Check query response time with B-tree index
+SELECT * 
+FROM query_timing
+WHERE query_name = 'btree_orders_status';
+
+-- Step 11: Check Index Size and Storage Overhead (%)
+SELECT 
+    t.segment_name AS table_name,
+    ROUND(t.size_mb, 2) AS table_size_mb,
+    i.segment_name AS index_name,
+    ROUND(i.size_mb, 2) AS index_size_mb,
+    ROUND((i.size_mb / t.size_mb) * 100, 2) AS overhead_percent
+FROM
+    (SELECT segment_name, SUM(bytes)/1024/1024 AS size_mb
+     FROM user_segments
+     WHERE segment_name = 'ORDERS'
+     GROUP BY segment_name) t
+JOIN
+    (SELECT segment_name, SUM(bytes)/1024/1024 AS size_mb
+     FROM user_segments
+     WHERE segment_name = 'IDX_ORDERS_STATUS'
+     GROUP BY segment_name) i
+ON 1=1;
+
+-- Step 12: Run throughput tests with B-tree index
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_total_queries NUMBER := 1000; -- Same number as baseline for fair comparison
+    v_status VARCHAR2(50);
+    v_count NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Throughput testing procedure (same as baseline but with index)
+    PROCEDURE run_throughput_query(p_status VARCHAR2) IS
+    BEGIN
+        v_status := p_status;
+        v_start := SYSTIMESTAMP;
+
+        -- Execute query repeatedly (now using index)
+        FOR i IN 1..v_total_queries LOOP
+            SELECT COUNT(*)
+            INTO v_count
+            FROM orders
+            WHERE order_status = v_status;
+        END LOOP;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert results with different query_name
+        INSERT INTO query_throughput (query_name, test_case, total_queries, elapsed_seconds, queries_per_sec)
+        VALUES ('btree_order_status', v_status, v_total_queries, v_seconds, v_total_queries / v_seconds);
+    END;
+
+BEGIN
+    -- Test throughput with index
+    run_throughput_query('delivered');   -- High selectivity
+    run_throughput_query('shipped');     -- Medium selectivity
+    run_throughput_query('processing');  -- Low selectivity
+
+    COMMIT;
+END;
+/
+
+-- Step 13: Check throughput results with B-tree index
+SELECT *
+FROM query_throughput
+WHERE query_name = 'btree_order_status';
+
+-- Step 14: Drop B-tree index before evaluating composite index baseline
+DROP INDEX IDX_ORDERS_STATUS;
+
+
+-- ====================================================================
+-- PART 2: COMPOSITE INDEX ANALYSIS
+-- ====================================================================
+
+-- Step 15: Run baseline timing for composite index queries (no index)
+-- Tests queries that filter on two columns: order_status AND order_purchase_timestamp
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_count NUMBER;
+    v_avg_payment NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Procedure to test queries with both status and date range filters
+    PROCEDURE run_composite_query(
+        p_start_date VARCHAR2,
+        p_end_date VARCHAR2,
+        p_label VARCHAR2
+    ) IS
+    BEGIN
+        v_start := SYSTIMESTAMP;
+
+        -- Query with date range filter (joins orders with payments)
+        SELECT COUNT(*), AVG(payment_value)
+        INTO v_count, v_avg_payment
+        FROM orders o
+        JOIN payments p ON o.order_id = p.order_id
+        WHERE o.order_status = 'delivered'
+          AND o.order_purchase_timestamp 
+          BETWEEN TO_DATE(p_start_date, 'YYYY-MM-DD') 
+          AND TO_DATE(p_end_date, 'YYYY-MM-DD');
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert baseline results for composite queries
+        INSERT INTO query_timing (query_name, test_case, rows_returned, elapsed_seconds)
+        VALUES ('baseline_composite_index', 
+                'delivered ' || p_label, 
+                v_count, 
+                v_seconds);
+    END;
+
+BEGIN
+    -- Test different date range selectivities
+    run_composite_query('2017-10-01', '2017-10-02', 'LOW(1day)');     -- Small date range
+    run_composite_query('2017-10-01', '2017-10-31', 'MEDIUM(1month)'); -- Medium date range
+    run_composite_query('2017-01-01', '2017-12-31', 'HIGH(1year)');    -- Large date range
+
+    COMMIT;
+END;
+/
+
+-- Step 16: Check baseline response time for composite queries
+SELECT * 
+FROM query_timing
+WHERE query_name = 'baseline_composite_index';
+
+-- Step 17: Run throughput baseline for composite queries (no index)
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_total_queries NUMBER := 1000; -- Number of repetitions for each test case
+    v_test_case VARCHAR2(100);
+    v_count NUMBER;
+    v_avg_payment NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Throughput testing for composite queries
+    PROCEDURE run_composite_throughput(
+        p_start_date VARCHAR2,
+        p_end_date VARCHAR2,
+        p_label VARCHAR2
+    ) IS
+    BEGIN
+        v_test_case := p_label;
+        v_start := SYSTIMESTAMP;
+
+        -- Repeat the composite query multiple times
+        FOR i IN 1..v_total_queries LOOP
+            -- Query with both status and date range filters
+            SELECT COUNT(*), AVG(payment_value)
+            INTO v_count, v_avg_payment
+            FROM orders o
+            JOIN payments p ON o.order_id = p.order_id
+            WHERE o.order_status = 'delivered'
+              AND o.order_purchase_timestamp 
+              BETWEEN TO_DATE(p_start_date, 'YYYY-MM-DD') 
+              AND TO_DATE(p_end_date, 'YYYY-MM-DD');
+        END LOOP;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert baseline throughput results
+        INSERT INTO query_throughput 
+        (query_name, test_case, total_queries, elapsed_seconds, queries_per_sec)
+        VALUES (
+            'baseline_composite_throughput', 
+            'delivered - ' || p_label, 
+            v_total_queries, 
+            v_seconds, 
+            v_total_queries / v_seconds
+        );
+    END;
+
+BEGIN
+    -- Test throughput for different date ranges
+    run_composite_throughput('2017-10-01', '2017-10-02', 'LOW(1day)');     -- Small range
+    run_composite_throughput('2017-10-01', '2017-10-31', 'MEDIUM(1month)'); -- Medium range
+    run_composite_throughput('2017-01-01', '2017-12-31', 'HIGH(1year)');    -- Large range
+
+    COMMIT;
+END;
+/
+
+-- Step 18: Check baseline query throughput for composite queries
+SELECT *
+FROM query_throughput
+WHERE query_name = 'baseline_composite_throughput';
+
+-- Step 19: Create composite index on order_status and order_purchase_timestamp
+CREATE INDEX idx_composite
+ON orders(order_status, order_purchase_timestamp);
+
+-- Step 20: Run timing tests with composite index
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_count NUMBER;
+    v_avg_payment NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+
+    -- Same test procedure as baseline, but now with composite index
+    PROCEDURE run_composite_query(
+        p_start_date VARCHAR2,
+        p_end_date VARCHAR2,
+        p_label VARCHAR2
+    ) IS
+    BEGIN
+        v_start := SYSTIMESTAMP;
+
+        -- Query with date range filter (now using composite index)
+        SELECT COUNT(*), AVG(payment_value)
+        INTO v_count, v_avg_payment
+        FROM orders o
+        JOIN payments p ON o.order_id = p.order_id
+        WHERE o.order_status = 'delivered'
+          AND o.order_purchase_timestamp 
+          BETWEEN TO_DATE(p_start_date, 'YYYY-MM-DD') 
+          AND TO_DATE(p_end_date, 'YYYY-MM-DD');
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert results with composite index label
+        INSERT INTO query_timing (query_name, test_case, rows_returned, elapsed_seconds)
+        VALUES ('composite_index', 
+                'delivered ' || p_label, 
+                v_count, 
+                v_seconds);
+    END;
+
+BEGIN
+    -- Test same scenarios with composite index
+    run_composite_query('2017-10-01', '2017-10-02', 'LOW(1day)');     -- Small range
+    run_composite_query('2017-10-01', '2017-10-31', 'MEDIUM(1month)'); -- Medium range
+    run_composite_query('2017-01-01', '2017-12-31', 'HIGH(1year)');    -- Large range
+
+    COMMIT;
+END;
+/
+
+-- Step 21: Check query response time with composite index
+SELECT * 
+FROM query_timing
+WHERE query_name = 'composite_index';
+
+-- Step 22: Check composite index storage overhead
+SELECT 
+    t.segment_name AS table_name,
+    ROUND(t.size_mb, 2) AS table_size_mb,
+    i.segment_name AS index_name,
+    ROUND(i.size_mb, 2) AS index_size_mb,
+    ROUND((i.size_mb / t.size_mb) * 100, 2) AS overhead_percent
+FROM
+    (SELECT segment_name, SUM(bytes)/1024/1024 AS size_mb
+     FROM user_segments
+     WHERE segment_name = 'ORDERS'
+     GROUP BY segment_name) t
+JOIN
+    (SELECT segment_name, SUM(bytes)/1024/1024 AS size_mb
+     FROM user_segments
+     WHERE segment_name = 'IDX_COMPOSITE'
+     GROUP BY segment_name) i
+ON 1=1;
+
+-- Step 23: Run throughput test for composite index
+DECLARE
+    v_start TIMESTAMP;
+    v_end   TIMESTAMP;
+    v_total_queries NUMBER := 1000; -- Same number as baseline for comparison
+    v_test_case VARCHAR2(100);
+    v_count NUMBER;
+    v_interval INTERVAL DAY TO SECOND;
+    v_seconds NUMBER;
+    v_avg_payment NUMBER;
+
+    -- Throughput testing with composite index
+    PROCEDURE run_composite_throughput(
+        p_start_date VARCHAR2,
+        p_end_date VARCHAR2,
+        p_label VARCHAR2
+    ) IS
+    BEGIN
+        v_test_case := p_label;
+        v_start := SYSTIMESTAMP;
+
+        -- Repeat composite query with index
+        FOR i IN 1..v_total_queries LOOP
+            -- Query with BOTH filters: status AND date range
+            SELECT COUNT(*), AVG(payment_value)
+            INTO v_count, v_avg_payment
+            FROM orders o
+            JOIN payments p ON o.order_id = p.order_id
+            WHERE o.order_status = 'delivered'
+              AND o.order_purchase_timestamp 
+              BETWEEN TO_DATE(p_start_date, 'YYYY-MM-DD') 
+              AND TO_DATE(p_end_date, 'YYYY-MM-DD');
+        END LOOP;
+
+        v_end := SYSTIMESTAMP;
+        v_interval := v_end - v_start;
+
+        -- Convert interval to total seconds
+        v_seconds := EXTRACT(DAY FROM v_interval)*24*3600
+                     + EXTRACT(HOUR FROM v_interval)*3600
+                     + EXTRACT(MINUTE FROM v_interval)*60
+                     + EXTRACT(SECOND FROM v_interval);
+
+        -- Insert throughput results with composite index
+        INSERT INTO query_throughput 
+        (query_name, test_case, total_queries, elapsed_seconds, queries_per_sec)
+        VALUES (
+            'composite_index', 
+            'delivered - ' || p_label, 
+            v_total_queries, 
+            v_seconds, 
+            v_total_queries / v_seconds
+        );
+    END;
+
+BEGIN
+    -- Clear previous composite index results (if any)
+    DELETE FROM query_throughput
+    WHERE query_name = 'composite_index';
+    
+    -- Test throughput with composite index
+    run_composite_throughput('2017-10-01', '2017-10-02', 'LOW(1day)');     -- Small range
+    run_composite_throughput('2017-10-01', '2017-10-31', 'MEDIUM(1month)'); -- Medium range
+    run_composite_throughput('2017-01-01', '2017-12-31', 'HIGH(1year)');    -- Large range
+
+    COMMIT;
+END;
+/
+
+-- Step 24: Check throughput results with composite index
+SELECT * FROM query_throughput 
+WHERE query_name = 'composite_index';
+
+-- ====================================================================
+-- END OF RO1: INDEXING ANALYSIS SCRIPT
+-- ====================================================================

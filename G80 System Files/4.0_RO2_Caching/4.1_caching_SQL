@@ -1,0 +1,66 @@
+-- ============================================================================
+-- RO2: READ-THROUGH CACHING IMPLEMENTATION SCRIPT
+-- ============================================================================
+-- This script contains SQL statements to implement and test read-through caching
+-- in Oracle Apex for Research Objective 2 (RO2).
+-- IMPORTANT: Run only one statement or block at a time.
+-- ============================================================================
+
+-- Step 1: Create SIMPLE cache table
+-- Purpose: Stores cached query results with metadata for cache management
+CREATE TABLE query_cache (
+    cache_key VARCHAR2(500) PRIMARY KEY,        -- Unique identifier for cache entry
+    query_text VARCHAR2(4000),                  -- Original SQL query text (for debugging)
+    rows_returned NUMBER,                       -- Number of rows in cached result set
+    created_time TIMESTAMP DEFAULT SYSTIMESTAMP, -- When cache entry was created
+    last_accessed TIMESTAMP DEFAULT SYSTIMESTAMP, -- Last time cache was accessed
+    access_count NUMBER DEFAULT 0               -- Counter for how many times cache was used
+);
+
+-- Step 2: Create metrics table  
+-- Purpose: Tracks performance metrics for cached vs non-cached query execution
+CREATE TABLE cache_metrics (
+    metric_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- Auto-incrementing ID
+    test_type VARCHAR2(20),       -- 'with_cache' or 'without_cache' (test scenario)
+    cache_status VARCHAR2(10),    -- 'HIT' (found in cache), 'MISS' (not in cache), 'N/A' (no cache)
+    query_type VARCHAR2(50),      -- Type of query (e.g., 'complex_join', 'simple_count')
+    test_case VARCHAR2(100),      -- Specific test case identifier (e.g., '2017-10-01_to_2017-10-31')
+    response_time_ms NUMBER(10,2), -- Query execution time in milliseconds
+    rows_returned NUMBER,          -- Number of rows returned by query
+    run_time TIMESTAMP DEFAULT SYSTIMESTAMP -- Timestamp when test was executed
+);
+
+-- Step 3: Create indexes for performance optimization
+-- Purpose: Improve lookup performance for cache and query operations
+CREATE INDEX idx_query_cache_key ON query_cache(cache_key); -- Fast cache key lookups
+CREATE INDEX idx_orders_status_time ON orders(order_status, order_purchase_timestamp); -- Composite index for query optimization
+
+-- Step 4: Check metrics (view current test results)
+-- Purpose: Display collected performance metrics in chronological order
+SELECT 
+    test_type,
+    cache_status,
+    response_time_ms,
+    rows_returned,
+    TO_CHAR(run_time, 'HH24:MI:SS') as time_run
+FROM cache_metrics 
+ORDER BY run_time; -- Sort by execution time to see progression
+
+-- Step 5: Calculate performance metrics and cache effectiveness
+-- Purpose: Analyze cache hit ratio and performance improvement statistics
+SELECT 
+    'COMPLEX QUERIES' as query_category, -- Label for this analysis section
+    COUNT(*) as total_queries, -- Total number of queries executed
+    SUM(CASE WHEN cache_status = 'HIT' THEN 1 ELSE 0 END) as cache_hits, -- Count of cache hits
+    SUM(CASE WHEN cache_status = 'MISS' THEN 1 ELSE 0 END) as cache_misses, -- Count of cache misses
+    ROUND(SUM(CASE WHEN cache_status = 'HIT' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as cache_hit_ratio_percent, -- Percentage of queries served from cache
+    ROUND(AVG(CASE WHEN test_type = 'with_cache' THEN response_time_ms END), 2) as avg_with_cache_ms, -- Average response time with cache
+    ROUND(AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END), 2) as avg_without_cache_ms, -- Average response time without cache
+    ROUND(
+        (AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END) - 
+         AVG(CASE WHEN test_type = 'with_cache' THEN response_time_ms END)) * 100.0 /
+        AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END),
+        2
+    ) as improvement_percent -- Percentage improvement when using cache
+FROM cache_metrics
+WHERE query_type = 'complex_join'; -- Filter for complex join queries only

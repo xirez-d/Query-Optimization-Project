@@ -1,0 +1,726 @@
+// ============================================================================
+// MONGODB PERFORMANCE TESTING SCRIPT - RESEARCH OBJECTIVE 1 (RO1): INDEXING
+// ============================================================================
+// 
+// PURPOSE:
+// This JavaScript script tests indexing strategies (B-Tree and Composite) 
+// in MongoDB to evaluate their impact on query performance and storage overhead.
+//
+// IMPORTANT PREREQUISITES:
+// 1. Create a MongoDB database named "Olist" and create collections
+// 2. Import all JSON data files into their respective collections:
+// 3. Import commands example (run from command line):
+//    mongoimport --db Olist --collection orders --file orders.json --jsonArray
+//    mongoimport --db Olist --collection payments --file payments.json --jsonArray
+//    (Repeat for all collections)
+//
+// HOW TO RUN:
+// 1. Start MongoDB shell: `mongosh`
+// 2. Switch to Olist database: `use Olist`
+// 3. Paste this script and run
+//
+// OUTPUT:
+// Results are stored in three collections in the Olist database:
+// 1. query_timing     - Query response time metrics
+// 2. query_throughput - Throughput (queries per second) metrics  
+// 3. index_storage    - Index size and storage overhead metrics
+//
+// Note: Run this script ONCE to avoid duplicate test data
+// ============================================================================
+
+// ============================================================================
+// CONFIGURATION SECTION
+// ============================================================================
+
+const CONFIG = {
+    // Database collection names (must match your imported collections)
+    ordersCollection: "orders",
+    paymentsCollection: "payments",
+    
+    // Testing parameters
+    totalQueries: 1000,                    // Number of queries for throughput tests
+    
+    // Test cases for B-Tree index (single-field queries)
+    testStatuses: ["delivered", "shipped", "processing"],
+    
+    // Test cases for Composite index (multi-field queries)
+    compositeTestCases: [
+        { label: "LOW(1day)", start: "2017-10-01", end: "2017-10-02" },
+        { label: "MEDIUM(1month)", start: "2017-10-01", end: "2017-10-31" },
+        { label: "HIGH(1year)", start: "2017-01-01", end: "2017-12-31" }
+    ]
+};
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * Prints a formatted header for better output organization
+ * @param {string} title - Header title to display
+ */
+function printHeader(title) {
+    print(`\n${'='.repeat(60)}`);
+    print(`  ${title}`);
+    print(`${'='.repeat(60)}`);
+}
+
+/**
+ * Prints formatted test results
+ * @param {string} label - Result label
+ * @param {string} value - Result value
+ * @param {string} unit - Unit of measurement (optional)
+ */
+function printResult(label, value, unit = "") {
+    print(`  ${label}: ${value}${unit}`);
+}
+
+/**
+ * Gets the size of an index in bytes
+ * @param {string} indexName - Name of the index to measure
+ * @returns {number} - Index size in bytes
+ */
+function getIndexSize(indexName) {
+    const stats = db[CONFIG.ordersCollection].stats();
+    return stats.indexSizes[indexName] || 0;
+}
+
+/**
+ * Calculates storage overhead percentage of an index
+ * @param {number} indexSize - Size of index in bytes
+ * @returns {number} - Overhead percentage
+ */
+function calculateOverhead(indexSize) {
+    const stats = db[CONFIG.ordersCollection].stats();
+    const tableSize = stats.storageSize;
+    return tableSize > 0 ? (indexSize / tableSize * 100) : 0;
+}
+
+// ============================================================================
+// TEST SUITE 1: SINGLE-FIELD BASELINE (No Index)
+// ============================================================================
+/**
+ * Tests single-field query performance WITHOUT any indexes.
+ * This establishes baseline performance for B-Tree index comparison.
+ */
+function runSingleFieldBaseline() {
+    printHeader("SINGLE-FIELD BASELINE TESTS (for B-tree comparison)");
+    
+    // Clear previous baseline results to avoid duplicate data
+    db.query_timing.deleteMany({ test_type: "baseline", query_category: "single_field" });
+    db.query_throughput.deleteMany({ test_type: "baseline", query_category: "single_field" });
+    
+    // ------------------------------------------------------------------------
+    // RESPONSE TIME TESTS: Measure execution time for COUNT queries
+    // ------------------------------------------------------------------------
+    print("\n[Response Time - COUNT(*) by order_status]");
+    CONFIG.testStatuses.forEach(status => {
+        const start = new Date();
+        const count = db[CONFIG.ordersCollection].countDocuments({ order_status: status });
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        
+        // Store results in query_timing collection for analysis
+        db.query_timing.insertOne({
+            test_type: "baseline",
+            query_category: "single_field",
+            index_type: "none",
+            test_case: status,
+            query_description: `SELECT COUNT(*) FROM orders WHERE order_status='${status}'`,
+            rows_returned: count,
+            elapsed_seconds: seconds,
+            run_time: new Date()
+        });
+        
+        printResult(status, `${seconds.toFixed(4)}s`, ` (${count} rows)`);
+    });
+    
+    // ------------------------------------------------------------------------
+    // THROUGHPUT TESTS: Measure queries per second for repeated queries
+    // ------------------------------------------------------------------------
+    print("\n[Throughput - Repeated COUNT queries]");
+    CONFIG.testStatuses.forEach(status => {
+        const start = new Date();
+        
+        // Execute the same query multiple times to measure throughput
+        for (let i = 0; i < CONFIG.totalQueries; i++) {
+            db[CONFIG.ordersCollection].countDocuments({ order_status: status });
+        }
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        const qps = CONFIG.totalQueries / seconds;  // Queries per second
+        
+        // Store throughput results
+        db.query_throughput.insertOne({
+            test_type: "baseline",
+            query_category: "single_field",
+            index_type: "none",
+            test_case: status,
+            total_queries: CONFIG.totalQueries,
+            elapsed_seconds: seconds,
+            queries_per_sec: qps,
+            run_time: new Date()
+        });
+        
+        printResult(status, `${qps.toFixed(2)} QPS`);
+    });
+}
+
+// ============================================================================
+// TEST SUITE 2: B-TREE INDEX TESTS
+// ============================================================================
+/**
+ * Tests single-field query performance WITH B-Tree index.
+ * Compares results with baseline to measure index effectiveness.
+ */
+function runBTreeIndexTests() {
+    printHeader("B-TREE INDEX TESTS");
+    
+    // ------------------------------------------------------------------------
+    // CREATE B-TREE INDEX on order_status field
+    // ------------------------------------------------------------------------
+    print("\n[Creating B-Tree Index on order_status]");
+    const indexStart = new Date();
+    db[CONFIG.ordersCollection].createIndex({ order_status: 1 }, { 
+        name: "idx_orders_status" 
+    });
+    const indexEnd = new Date();
+    const indexTime = (indexEnd - indexStart) / 1000;
+    printResult("Index creation time", `${indexTime.toFixed(2)}s`);
+    
+    // ------------------------------------------------------------------------
+    // MEASURE INDEX STORAGE OVERHEAD
+    // ------------------------------------------------------------------------
+    const indexSize = getIndexSize("idx_orders_status");
+    const indexSizeMB = indexSize / 1024 / 1024;
+    const overheadPercent = calculateOverhead(indexSize);
+    
+    printResult("Index size", `${indexSizeMB.toFixed(2)} MB`);
+    printResult("Storage overhead", `${overheadPercent.toFixed(2)}%`);
+    
+    // Save index storage metrics for later analysis
+    const stats = db[CONFIG.ordersCollection].stats();
+    db.index_storage.insertOne({
+        index_name: "idx_orders_status",
+        index_type: "b_tree",
+        index_size_bytes: indexSize,
+        index_size_mb: indexSizeMB,
+        table_size_bytes: stats.storageSize,
+        table_size_mb: stats.storageSize / 1024 / 1024,
+        overhead_percentage: overheadPercent,
+        created_time: new Date()
+    });
+    
+    // ------------------------------------------------------------------------
+    // RESPONSE TIME TESTS with B-Tree index
+    // ------------------------------------------------------------------------
+    print("\n[Response Time with B-Tree Index]");
+    CONFIG.testStatuses.forEach(status => {
+        const start = new Date();
+        const count = db[CONFIG.ordersCollection].countDocuments({ order_status: status });
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        
+        db.query_timing.insertOne({
+            test_type: "with_index",
+            query_category: "single_field",
+            index_type: "b_tree",
+            test_case: status,
+            query_description: `SELECT COUNT(*) FROM orders WHERE order_status='${status}'`,
+            rows_returned: count,
+            elapsed_seconds: seconds,
+            storage_overhead_mb: indexSizeMB.toFixed(2),
+            storage_overhead_percent: overheadPercent.toFixed(2),
+            run_time: new Date()
+        });
+        
+        printResult(status, `${seconds.toFixed(4)}s`);
+    });
+    
+    // ------------------------------------------------------------------------
+    // THROUGHPUT TESTS with B-Tree index
+    // ------------------------------------------------------------------------
+    print("\n[Throughput with B-Tree Index]");
+    CONFIG.testStatuses.forEach(status => {
+        const start = new Date();
+        
+        for (let i = 0; i < CONFIG.totalQueries; i++) {
+            db[CONFIG.ordersCollection].countDocuments({ order_status: status });
+        }
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        const qps = CONFIG.totalQueries / seconds;
+        
+        db.query_throughput.insertOne({
+            test_type: "with_index",
+            query_category: "single_field",
+            index_type: "b_tree",
+            test_case: status,
+            total_queries: CONFIG.totalQueries,
+            elapsed_seconds: seconds,
+            queries_per_sec: qps,
+            run_time: new Date()
+        });
+        
+        printResult(status, `${qps.toFixed(2)} QPS`);
+    });
+    
+    // ------------------------------------------------------------------------
+    // DROP B-TREE INDEX before composite tests (clean environment)
+    // ------------------------------------------------------------------------
+    print("\n[Dropping B-Tree Index for clean composite tests]");
+    db[CONFIG.ordersCollection].dropIndex("idx_orders_status");
+}
+
+// ============================================================================
+// TEST SUITE 3: MULTI-FIELD BASELINE (No Composite Index)
+// ============================================================================
+/**
+ * Tests multi-field query performance WITHOUT composite index.
+ * This establishes baseline for composite index comparison.
+ */
+function runMultiFieldBaseline() {
+    printHeader("MULTI-FIELD BASELINE TESTS (for Composite comparison)");
+    
+    // Clear previous composite baseline results
+    db.query_timing.deleteMany({ test_type: "baseline", query_category: "multi_field" });
+    db.query_throughput.deleteMany({ test_type: "baseline", query_category: "multi_field" });
+    
+    // ------------------------------------------------------------------------
+    // RESPONSE TIME TESTS: Complex JOIN queries with date range
+    // ------------------------------------------------------------------------
+    print("\n[Response Time - Complex JOIN query with date range]");
+    
+    CONFIG.compositeTestCases.forEach(testCase => {
+        const start = new Date();
+        
+        // MongoDB aggregation pipeline to simulate SQL JOIN with filtering
+        const pipeline = [
+            {
+                $match: {
+                    order_status: "delivered",
+                    order_purchase_timestamp: {
+                        $gte: new Date(testCase.start),
+                        $lte: new Date(testCase.end)
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: CONFIG.paymentsCollection,
+                    localField: "order_id",
+                    foreignField: "order_id",
+                    as: "payments"
+                }
+            },
+            { $unwind: "$payments" },
+            {
+                $group: {
+                    _id: null,
+                    count: { $sum: 1 },
+                    avg_payment: { $avg: "$payments.payment_value" }
+                }
+            }
+        ];
+        
+        const result = db[CONFIG.ordersCollection].aggregate(pipeline).toArray();
+        const count = result.length > 0 ? result[0].count : 0;
+        const avgPayment = result.length > 0 ? result[0].avg_payment : 0;
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        
+        db.query_timing.insertOne({
+            test_type: "baseline",
+            query_category: "multi_field",
+            index_type: "none",
+            test_case: `delivered ${testCase.label}`,
+            query_description: `Complex JOIN with date range: ${testCase.start} to ${testCase.end}`,
+            rows_returned: count,
+            elapsed_seconds: seconds,
+            avg_payment_value: avgPayment,
+            run_time: new Date()
+        });
+        
+        printResult(testCase.label, `${seconds.toFixed(4)}s`, ` (${count} rows, avg payment: ${avgPayment.toFixed(2)})`);
+    });
+    
+    // ------------------------------------------------------------------------
+    // THROUGHPUT TESTS: Repeated complex queries
+    // ------------------------------------------------------------------------
+    print("\n[Throughput - Repeated complex JOIN queries]");
+    CONFIG.compositeTestCases.forEach(testCase => {
+        const start = new Date();
+        
+        for (let i = 0; i < CONFIG.totalQueries; i++) {
+            db[CONFIG.ordersCollection].countDocuments({
+                order_status: "delivered",
+                order_purchase_timestamp: {
+                    $gte: new Date(testCase.start),
+                    $lte: new Date(testCase.end)
+                }
+            });
+        }
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        const qps = CONFIG.totalQueries / seconds;
+        
+        db.query_throughput.insertOne({
+            test_type: "baseline",
+            query_category: "multi_field",
+            index_type: "none",
+            test_case: `delivered ${testCase.label}`,
+            total_queries: CONFIG.totalQueries,
+            elapsed_seconds: seconds,
+            queries_per_sec: qps,
+            run_time: new Date()
+        });
+        
+        printResult(testCase.label, `${qps.toFixed(2)} QPS`);
+    });
+}
+
+// ============================================================================
+// TEST SUITE 4: COMPOSITE INDEX TESTS
+// ============================================================================
+/**
+ * Tests multi-field query performance WITH composite index.
+ * Compares results with multi-field baseline to measure composite index effectiveness.
+ */
+function runCompositeIndexTests() {
+    printHeader("COMPOSITE INDEX TESTS");
+    
+    // ------------------------------------------------------------------------
+    // CREATE COMPOSITE INDEX on (order_status, order_purchase_timestamp)
+    // ------------------------------------------------------------------------
+    print("\n[Creating Composite Index on (order_status, order_purchase_timestamp)]");
+    const indexStart = new Date();
+    db[CONFIG.ordersCollection].createIndex(
+        { order_status: 1, order_purchase_timestamp: 1 },
+        { name: "idx_composite_status_timestamp" }
+    );
+    const indexEnd = new Date();
+    const indexTime = (indexEnd - indexStart) / 1000;
+    
+    printResult("Index creation time", `${indexTime.toFixed(2)}s`);
+    
+    // ------------------------------------------------------------------------
+    // MEASURE COMPOSITE INDEX STORAGE OVERHEAD
+    // ------------------------------------------------------------------------
+    const indexSize = getIndexSize("idx_composite_status_timestamp");
+    const indexSizeMB = indexSize / 1024 / 1024;
+    const overheadPercent = calculateOverhead(indexSize);
+    
+    printResult("Index size", `${indexSizeMB.toFixed(2)} MB`);
+    printResult("Storage overhead", `${overheadPercent.toFixed(2)}%`);
+    
+    // Save composite index storage metrics
+    const stats = db[CONFIG.ordersCollection].stats();
+    db.index_storage.insertOne({
+        index_name: "idx_composite_status_timestamp",
+        index_type: "composite",
+        index_size_bytes: indexSize,
+        index_size_mb: indexSizeMB,
+        table_size_bytes: stats.storageSize,
+        table_size_mb: stats.storageSize / 1024 / 1024,
+        overhead_percentage: overheadPercent,
+        created_time: new Date()
+    });
+    
+    // ------------------------------------------------------------------------
+    // RESPONSE TIME TESTS with composite index
+    // ------------------------------------------------------------------------
+    print("\n[Response Time with Composite Index]");
+    CONFIG.compositeTestCases.forEach(testCase => {
+        const start = new Date();
+        
+        const pipeline = [
+            {
+                $match: {
+                    order_status: "delivered",
+                    order_purchase_timestamp: {
+                        $gte: new Date(testCase.start),
+                        $lte: new Date(testCase.end)
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: CONFIG.paymentsCollection,
+                    localField: "order_id",
+                    foreignField: "order_id",
+                    as: "payments"
+                }
+            },
+            { $unwind: "$payments" },
+            {
+                $group: {
+                    _id: null,
+                    count: { $sum: 1 },
+                    avg_payment: { $avg: "$payments.payment_value" }
+                }
+            }
+        ];
+        
+        const result = db[CONFIG.ordersCollection].aggregate(pipeline).toArray();
+        const count = result.length > 0 ? result[0].count : 0;
+        const avgPayment = result.length > 0 ? result[0].avg_payment : 0;
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        
+        db.query_timing.insertOne({
+            test_type: "with_index",
+            query_category: "multi_field",
+            index_type: "composite",
+            test_case: `delivered ${testCase.label}`,
+            query_description: `Complex JOIN with date range, using composite index`,
+            rows_returned: count,
+            elapsed_seconds: seconds,
+            avg_payment_value: avgPayment,
+            storage_overhead_mb: indexSizeMB.toFixed(2),
+            storage_overhead_percent: overheadPercent.toFixed(2),
+            run_time: new Date()
+        });
+        
+        printResult(testCase.label, `${seconds.toFixed(4)}s`, ` (${count} rows)`);
+    });
+    
+    // ------------------------------------------------------------------------
+    // THROUGHPUT TESTS with composite index
+    // ------------------------------------------------------------------------
+    print("\n[Throughput with Composite Index]");
+    CONFIG.compositeTestCases.forEach(testCase => {
+        const start = new Date();
+        
+        for (let i = 0; i < CONFIG.totalQueries; i++) {
+            db[CONFIG.ordersCollection].countDocuments({
+                order_status: "delivered",
+                order_purchase_timestamp: {
+                    $gte: new Date(testCase.start),
+                    $lte: new Date(testCase.end)
+                }
+            });
+        }
+        
+        const end = new Date();
+        const seconds = (end - start) / 1000;
+        const qps = CONFIG.totalQueries / seconds;
+        
+        db.query_throughput.insertOne({
+            test_type: "with_index",
+            query_category: "multi_field",
+            index_type: "composite",
+            test_case: `delivered ${testCase.label}`,
+            total_queries: CONFIG.totalQueries,
+            elapsed_seconds: seconds,
+            queries_per_sec: qps,
+            run_time: new Date()
+        });
+        
+        printResult(testCase.label, `${qps.toFixed(2)} QPS`);
+    });
+}
+
+// ============================================================================
+// GENERATE COMPARISON REPORTS
+// ============================================================================
+/**
+ * Generates formatted comparison reports from collected test data.
+ * Compares baseline vs. indexed performance across all test cases.
+ */
+function generateComparisonReports() {
+    printHeader("RESEARCH RESULTS - COMPARATIVE ANALYSIS");
+    
+    // ------------------------------------------------------------------------
+    // 1. SINGLE-FIELD QUERY COMPARISON (B-tree Index vs Baseline)
+    // ------------------------------------------------------------------------
+    print("\n[1. SINGLE-FIELD QUERIES: B-tree Index vs Baseline]");
+    print("=".repeat(80));
+    print("Test Type      | Index Type | Test Case   | Rows | Time (s)   | Improvement");
+    print("-".repeat(80));
+    
+    const singleFieldResults = db.query_timing.find({ 
+        query_category: "single_field" 
+    }).sort({ test_case: 1, test_type: 1 }).toArray();
+    
+    const groupedByCase = {};
+    singleFieldResults.forEach(doc => {
+        if (!groupedByCase[doc.test_case]) {
+            groupedByCase[doc.test_case] = {};
+        }
+        groupedByCase[doc.test_case][doc.test_type] = doc;
+    });
+    
+    Object.entries(groupedByCase).forEach(([testCase, results]) => {
+        const baseline = results.baseline;
+        const indexed = results.with_index;
+        
+        if (baseline && indexed) {
+            const improvement = ((baseline.elapsed_seconds - indexed.elapsed_seconds) / baseline.elapsed_seconds * 100).toFixed(1);
+            print(`Baseline      | none        | ${testCase.padEnd(12)} | ${baseline.rows_returned.toString().padEnd(4)} | ${baseline.elapsed_seconds.toFixed(4).padEnd(10)} | -`);
+            print(`With Index    | b_tree      | ${testCase.padEnd(12)} | ${indexed.rows_returned.toString().padEnd(4)} | ${indexed.elapsed_seconds.toFixed(4).padEnd(10)} | ${improvement}% faster`);
+            print("-".repeat(80));
+        }
+    });
+    
+    // ------------------------------------------------------------------------
+    // 2. MULTI-FIELD QUERY COMPARISON (Composite Index vs Baseline)
+    // ------------------------------------------------------------------------
+    print("\n\n[2. MULTI-FIELD QUERIES: Composite Index vs Baseline]");
+    print("=".repeat(80));
+    print("Test Type      | Index Type  | Test Case          | Rows | Time (s)   | Improvement");
+    print("-".repeat(80));
+    
+    const multiFieldResults = db.query_timing.find({ 
+        query_category: "multi_field" 
+    }).sort({ test_case: 1, test_type: 1 }).toArray();
+    
+    const groupedMulti = {};
+    multiFieldResults.forEach(doc => {
+        if (!groupedMulti[doc.test_case]) {
+            groupedMulti[doc.test_case] = {};
+        }
+        groupedMulti[doc.test_case][doc.test_type] = doc;
+    });
+    
+    Object.entries(groupedMulti).forEach(([testCase, results]) => {
+        const baseline = results.baseline;
+        const indexed = results.with_index;
+        
+        if (baseline && indexed) {
+            const improvement = ((baseline.elapsed_seconds - indexed.elapsed_seconds) / baseline.elapsed_seconds * 100).toFixed(1);
+            print(`Baseline      | none        | ${testCase.padEnd(19)} | ${baseline.rows_returned.toString().padEnd(4)} | ${baseline.elapsed_seconds.toFixed(4).padEnd(10)} | -`);
+            print(`With Index    | composite   | ${testCase.padEnd(19)} | ${indexed.rows_returned.toString().padEnd(4)} | ${indexed.elapsed_seconds.toFixed(4).padEnd(10)} | ${improvement}% faster`);
+            print("-".repeat(80));
+        }
+    });
+    
+    // ------------------------------------------------------------------------
+    // 3. STORAGE OVERHEAD ANALYSIS
+    // ------------------------------------------------------------------------
+    print("\n\n[3. STORAGE OVERHEAD ANALYSIS]");
+    
+    const storageResults = db.index_storage.find().sort({ index_type: 1 }).toArray();
+    
+    if (storageResults.length > 0) {
+        print("=".repeat(60));
+        print("Index Name                      | Type      | Size (MB) | Overhead %");
+        print("-".repeat(60));
+        
+        storageResults.forEach(index => {
+            const indexName = index.index_name.padEnd(30);
+            const indexType = index.index_type.padEnd(10);
+            const sizeMB = index.index_size_mb.toFixed(2).padStart(8);
+            const overhead = index.overhead_percentage.toFixed(2).padStart(10);
+            
+            print(`${indexName} | ${indexType} | ${sizeMB} | ${overhead}%`);
+        });
+        
+        print("-".repeat(60));
+        
+        // Calculate totals
+        const totalIndexSize = storageResults.reduce((sum, idx) => sum + idx.index_size_bytes, 0);
+        const totalTableSize = storageResults[0].table_size_bytes; // All have same table size
+        const totalOverhead = totalTableSize > 0 ? (totalIndexSize / totalTableSize * 100) : 0;
+        
+        print(`Total Index Storage: ${(totalIndexSize / 1024 / 1024).toFixed(2)} MB`);
+        print(`Table Storage: ${(totalTableSize / 1024 / 1024).toFixed(2)} MB`);
+        print(`Overall Storage Overhead: ${totalOverhead.toFixed(2)}%`);
+    } else {
+        print("No index storage data found.");
+    }
+    
+    // ------------------------------------------------------------------------
+    // 4. THROUGHPUT COMPARISON (Queries Per Second)
+    // ------------------------------------------------------------------------
+    print("\n\n[4. THROUGHPUT COMPARISON (Queries Per Second)]");
+    print("=".repeat(80));
+    
+    const throughputResults = db.query_throughput.find().sort({ queries_per_sec: -1 }).toArray();
+    
+    throughputResults.forEach(doc => {
+        const indexType = doc.index_type === "none" ? "No Index" : 
+                         doc.index_type === "b_tree" ? "B-Tree" : "Composite";
+        const category = doc.query_category === "single_field" ? "Single" : "Multi";
+        
+        print(`${category.padEnd(6)} | ${indexType.padEnd(9)} | ${doc.test_case.padEnd(20)} | ${doc.queries_per_sec.toFixed(2).padEnd(10)} QPS`);
+    });
+}
+
+// ============================================================================
+// MAIN EXECUTION FUNCTION
+// ============================================================================
+/**
+ * Main function that orchestrates the entire testing process.
+ * Initializes collections, runs all test suites, and generates reports.
+ */
+function main() {
+    // ------------------------------------------------------------------------
+    // INITIALIZE COLLECTIONS in the Olist database
+    // ------------------------------------------------------------------------
+    const collections = ["query_timing", "query_throughput", "index_storage"];
+    
+    collections.forEach(collectionName => {
+        if (!db.getCollectionNames().includes(collectionName)) {
+            db.createCollection(collectionName);
+            print(`Created collection: ${collectionName}`);
+        }
+    });
+    
+    // Clear old test data to ensure clean results
+    db.query_timing.deleteMany({});
+    db.query_throughput.deleteMany({});
+    db.index_storage.deleteMany({});
+    print("Cleared previous test data");
+    
+    // ------------------------------------------------------------------------
+    // DISPLAY TEST INFORMATION
+    // ------------------------------------------------------------------------
+    printHeader("MONGODB INDEXING PERFORMANCE TEST");
+    print("Research Objective 1: Indexing Strategies");
+    print(`Database: ${db.getName()}`);
+    print(`Orders collection: ${db[CONFIG.ordersCollection].countDocuments()} documents`);
+    print(`Payments collection: ${db[CONFIG.paymentsCollection].countDocuments()} documents`);
+    print(`Note: Ensure you're using the "Olist" database`);
+    
+    // ------------------------------------------------------------------------
+    // EXECUTE TEST SUITES IN SEQUENCE
+    // ------------------------------------------------------------------------
+    runSingleFieldBaseline();     // Baseline for B-tree comparison
+    runBTreeIndexTests();         // B-tree index tests
+    runMultiFieldBaseline();      // Baseline for composite comparison  
+    runCompositeIndexTests();     // Composite index tests
+    
+    // ------------------------------------------------------------------------
+    // GENERATE AND DISPLAY REPORTS
+    // ------------------------------------------------------------------------
+    generateComparisonReports();
+    
+    // ------------------------------------------------------------------------
+    // DISPLAY COMPLETION MESSAGE AND EXPORT INSTRUCTIONS
+    // ------------------------------------------------------------------------
+    printHeader("TESTING COMPLETE");
+    
+    print("\nResults stored in Olist database collections:");
+    print("1. query_timing - Query response time metrics");
+    print("2. query_throughput - Throughput (QPS) metrics");
+    print("3. index_storage - Index size and overhead metrics");
+    
+    print("\nTo export results for analysis:");
+    print(`mongoexport --db=Olist --collection=query_timing --out=query_timing.json`);
+    print(`mongoexport --db=Olist --collection=query_throughput --out=query_throughput.json`);
+    print(`mongoexport --db=Olist --collection=index_storage --out=index_storage.json`);
+    
+    print("\nNote: To rerun tests, first clear the results collections or use a new database.");
+}
+
+// ============================================================================
+// EXECUTE THE SCRIPT
+// ============================================================================
+
+// Start the testing process
+main();
