@@ -3,6 +3,11 @@
 # Project Overview
 This project conducts an analysis of query optimization techniques in SQL (Oracle) and NoSQL (MongoDB) databases using a Brazilian e-commerce dataset. The research investigates three key optimization strategies: indexing, caching, and scalability mechanisms.
 
+# Research Objectives
+1. To investigate how different indexing strategies affect query performance in SQL vs NoSQL databases under varying selectivity.
+2. To assess the effectiveness of Read-Through Caching in improving SQL and NoSQL database performance.
+3. To identify infrastructure prerequisites and implementation barriers for scalability-oriented query optimization techniques in constrained environments
+
 # Research Questions
 1. How do different indexing strategies (single-column B-tree vs. multi-level composite) affect query response time, throughput and storage overhead in SQL and NoSQL databases under varying query selectivity?
 2. How does Read-Through Caching impact query performance in SQL vs NoSQL databases?
