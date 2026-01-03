@@ -17,11 +17,12 @@ This project conducts an analysis of query optimization techniques in SQL (Oracl
 The project is organized into numbered folders that should be executed sequentially:
 ```
 G80_System_Files/
-├── 1.0_Datasets/                    # Contains dataset information (data not in repo)
+├── 1.0_Datasets/                   # Contains dataset information (data not in repo)
 ├── 2.0_Data_Preparation/           # Data sampling and preparation scripts
 ├── 3.0_RO1_Indexing/               # Research Objective 1: Indexing analysis
 ├── 4.0_RO2_Caching/                # Research Objective 2: Caching analysis
 └── 5.0_RO3_Scalability/            # Research Objective 3: Scalability analysis
+└── 6.0_Results_Visualizations/     # Visualization scripts and generated charts
 
 Important: Maintain the same folder hierarchy as shown above, or update all file paths in the Python scripts accordingly.
 ```
@@ -41,7 +42,7 @@ Execute in order:
 # Part 3: Caching Analysis
 Execute in order:
 1. Run SQL statements in ```4.1_caching_SQL.txt``` in Oracle APEX
-2. Execute Python scripts in ```4.2_caching_NoSQL/ folder in numerical order (4.2.1, 4.2.2, 4.2.3, 4.2.4)```
+2. Execute Python scripts in ```4.2_caching_NoSQL/ folder in numerical order (4.2.1, 4.2.2, 4.2.3)```
 
 # Part 4: Sharding and Partitioning Analysis
 Execute in order:
@@ -50,6 +51,11 @@ Execute in order:
 3. Run ```5.3_convert_json2.py``` in Python to convert new sample to JSON
 4. Load new JSON files into MongoDB
 5. Execute JavaScript commands in ```5.4_sharding_NoSQL.txt``` in MongoDB Shell
+
+# Part 5: Results Visualization
+After completing all experimental executions, generate visualizations:
+1. Run ```6.0_Results_Visualizations/RO1.py``` to generate charts for Research Objective 1 results
+2. Run ```6.0_Results_Visualizations/RO2.py``` to generate charts for Research Objective 2 results
 
 # Important Notes
 1. File Paths: If you change the folder structure, update all file paths in Python scripts accordingly
