@@ -1,259 +1,208 @@
--- ============================================================================
--- RO2: READ-THROUGH CACHING IMPLEMENTATION SCRIPT
--- ============================================================================
--- This script contains SQL statements to implement and test read-through caching
--- in Oracle Apex for Research Objective 2 (RO2).
--- IMPORTANT: Run only one statement or block at a time.
--- ============================================================================
-
--- Step 1: Create SIMPLE cache table
--- Purpose: Stores cached query results with metadata for cache management
+--Step 1: Create cache and metrics tables
+-- 1A: Cache table
 CREATE TABLE query_cache (
-    cache_key VARCHAR2(500) PRIMARY KEY,        -- Unique identifier for cache entry
-    query_text VARCHAR2(4000),                  -- Original SQL query text (for debugging)
-    rows_returned NUMBER,                       -- Number of rows in cached result set
-    created_time TIMESTAMP DEFAULT SYSTIMESTAMP, -- When cache entry was created
-    last_accessed TIMESTAMP DEFAULT SYSTIMESTAMP, -- Last time cache was accessed
-    access_count NUMBER DEFAULT 0               -- Counter for how many times cache was used
+    cache_key VARCHAR2(500) PRIMARY KEY,         -- Unique cache identifier
+    query_text VARCHAR2(4000),                   -- Original query text
+    rows_returned NUMBER,                        -- Cached result count
+    created_time TIMESTAMP DEFAULT SYSTIMESTAMP, -- When cache was created
+    last_accessed TIMESTAMP DEFAULT SYSTIMESTAMP,-- Last access time
+    access_count NUMBER DEFAULT 0                -- Hit counter
 );
 
--- Step 2: Create metrics table  
--- Purpose: Tracks performance metrics for cached vs non-cached query execution
+-- 1B: Metrics table
 CREATE TABLE cache_metrics (
-    metric_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- Auto-incrementing ID
-    test_type VARCHAR2(20),       -- 'with_cache' or 'without_cache' (test scenario)
-    cache_status VARCHAR2(10),    -- 'HIT' (found in cache), 'MISS' (not in cache), 'N/A' (no cache)
-    query_type VARCHAR2(50),      -- Type of query (e.g., 'complex_join', 'simple_count')
-    test_case VARCHAR2(100),      -- Specific test case identifier (e.g., '2017-10-01_to_2017-10-31')
-    response_time_ms NUMBER(10,2), -- Query execution time in milliseconds
-    rows_returned NUMBER,          -- Number of rows returned by query
-    run_time TIMESTAMP DEFAULT SYSTIMESTAMP -- Timestamp when test was executed
+    metric_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    test_type VARCHAR2(20),       -- 'with_cache' or 'without_cache'
+    cache_status VARCHAR2(10),    -- 'HIT', 'MISS', 'N/A'
+    query_type VARCHAR2(50),      -- 'complex_join'
+    test_case VARCHAR2(100),      -- e.g., '2017-10-01_to_2017-10-01'
+    response_time_ms NUMBER(10,2),-- Execution time
+    rows_returned NUMBER,
+    run_time TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 
--- Step 3: Create indexes for performance optimization
--- Purpose: Improve lookup performance for cache and query operations
-CREATE INDEX idx_query_cache_key ON query_cache(cache_key); -- Fast cache key lookups
-CREATE INDEX idx_orders_status_time ON orders(order_status, order_purchase_timestamp); -- Composite index for query optimization
+--Step 2: Create indexes
+CREATE INDEX idx_query_cache_key ON query_cache(cache_key);
+CREATE INDEX idx_orders_status_time ON orders(order_status, order_purchase_timestamp);
 
--- Step 4: Create PL/SQL procedure for read-through caching
-CREATE OR REPLACE PROCEDURE get_cached_complex_analysis(
-    p_start_date IN VARCHAR2,
-    p_end_date IN VARCHAR2,
-    p_use_cache IN BOOLEAN DEFAULT TRUE
+
+--Step 3: PL/SQL procedure – multiple queries
+CREATE OR REPLACE PROCEDURE get_cached_complex_analysis_batch(
+    p_start_date IN DATE,          -- start of test range
+    p_total_days IN NUMBER,        -- number of different date queries
+    p_repeats_per_day IN NUMBER    -- repetitions per day to produce hits
 ) AS
     v_start_time TIMESTAMP;
     v_end_time TIMESTAMP;
     v_response_ms NUMBER;
     v_cache_key VARCHAR2(500);
-    v_cache_status VARCHAR2(10) := 'N/A';
+    v_cache_status VARCHAR2(10);
     v_test_type VARCHAR2(20);
     v_row_count NUMBER;
     v_cache_exists NUMBER;
-    v_result_data SYS_REFCURSOR;
-    
-    -- Procedure to record metrics
+
+    -- Record metrics procedure
     PROCEDURE record_metrics(
         p_test_type VARCHAR2,
         p_cache_status VARCHAR2,
-        p_query_type VARCHAR2,
         p_test_case VARCHAR2,
         p_response_ms NUMBER,
         p_rows_returned NUMBER
     ) IS
     BEGIN
-        INSERT INTO cache_metrics 
+        INSERT INTO cache_metrics
         (test_type, cache_status, query_type, test_case, response_time_ms, rows_returned)
-        VALUES 
-        (p_test_type, p_cache_status, p_query_type, p_test_case, p_response_ms, p_rows_returned);
+        VALUES
+        (p_test_type, p_cache_status, 'complex_join', p_test_case, p_response_ms, p_rows_returned);
     END;
-    
-BEGIN
-    -- Set test type based on cache usage
-    IF p_use_cache THEN
-        v_test_type := 'with_cache';
-    ELSE
-        v_test_type := 'without_cache';
-    END IF;
-    
-    -- Generate cache key (same format as NoSQL)
-    v_cache_key := 'COMPLEX_' || p_start_date || '_TO_' || p_end_date;
-    
-    -- Start timing
-    v_start_time := SYSTIMESTAMP;
-    
-    -- CACHE LOGIC
-    IF p_use_cache THEN
-        -- Check if cache exists and is fresh (less than 30 minutes old)
-        SELECT COUNT(*)
-        INTO v_cache_exists
-        FROM query_cache
-        WHERE cache_key = v_cache_key
-          AND created_time > SYSTIMESTAMP - INTERVAL '30' MINUTE;
-        
-        IF v_cache_exists > 0 THEN
-            -- CACHE HIT
-            v_cache_status := 'HIT';
-            
-            -- Update cache metadata
-            UPDATE query_cache
-            SET last_accessed = SYSTIMESTAMP,
-                access_count = access_count + 1
-            WHERE cache_key = v_cache_key;
-            
-            -- Get cached row count
-            SELECT rows_returned INTO v_row_count
-            FROM query_cache
-            WHERE cache_key = v_cache_key;
-            
-            DBMS_OUTPUT.PUT_LINE('   Cache HIT for ' || v_cache_key);
-            
-        ELSE
-            -- CACHE MISS
-            v_cache_status := 'MISS';
-            DBMS_OUTPUT.PUT_LINE('   Cache MISS for ' || v_cache_key);
-        END IF;
-    END IF;
-    
-    -- EXECUTE QUERY if no cache or cache miss
-    IF NOT p_use_cache OR v_cache_status = 'MISS' THEN
-        -- Complex JOIN query (same logic as NoSQL)
-        SELECT COUNT(*)
-        INTO v_row_count
-        FROM orders o
-        JOIN customers c ON o.customer_id = c.customer_id
-        JOIN payments p ON o.order_id = p.order_id
-        WHERE o.order_status = 'delivered'
-          AND o.order_purchase_timestamp >= TO_DATE(p_start_date || ' 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
-          AND o.order_purchase_timestamp <= TO_DATE(p_end_date || ' 23:59:59', 'YYYY-MM-DD HH24:MI:SS');
-        
-        -- Store in cache if enabled and cache miss
-        IF p_use_cache AND v_cache_status = 'MISS' THEN
-            -- Delete old cache entry if exists
-            DELETE FROM query_cache WHERE cache_key = v_cache_key;
-            
-            -- Insert new cache entry
-            INSERT INTO query_cache 
-            (cache_key, query_text, rows_returned, created_time, last_accessed, access_count)
-            VALUES 
-            (
-                v_cache_key,
-                'Complex JOIN: delivered orders from ' || p_start_date || ' to ' || p_end_date,
-                v_row_count,
-                SYSTIMESTAMP,
-                SYSTIMESTAMP,
-                1
-            );
-            
-            DBMS_OUTPUT.PUT_LINE('   Result cached with ' || v_row_count || ' rows');
-        END IF;
-    END IF;
-    
-    -- End timing
-    v_end_time := SYSTIMESTAMP;
-    
-    -- Calculate response time in milliseconds
-    v_response_ms := EXTRACT(SECOND FROM (v_end_time - v_start_time)) * 1000 +
-                     EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 * 1000;
-    
-    -- Record metrics
-    record_metrics(
-        p_test_type => v_test_type,
-        p_cache_status => v_cache_status,
-        p_query_type => 'complex_join',
-        p_test_case => p_start_date || '_to_' || p_end_date,
-        p_response_ms => v_response_ms,
-        p_rows_returned => v_row_count
-    );
-    
-    DBMS_OUTPUT.PUT_LINE('   Query completed: ' || v_row_count || ' rows, ' || 
-                         ROUND(v_response_ms, 2) || ' ms');
-    
-EXCEPTION
-    WHEN OTHERS THEN
-        -- Record error in metrics
-        INSERT INTO cache_metrics 
-        (test_type, cache_status, query_type, test_case, response_time_ms, rows_returned)
-        VALUES 
-        (v_test_type, 'ERROR', 'complex_join', p_start_date || '_to_' || p_end_date, -1, 0);
-        
-        DBMS_OUTPUT.PUT_LINE('   Error: ' || SQLERRM);
-        RAISE;
-END;
-/
 
--- Step 5: Clear old test data
-DELETE FROM cache_metrics;
-DELETE FROM query_cache;
-COMMIT;
-
--- Step 6: Run tests (October 2017 - same as NoSQL)
-DECLARE
-    v_test_date VARCHAR2(10) := '2017-10-01';
-    v_test_end_date VARCHAR2(10) := '2017-10-31';
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('=' || RPAD('=', 58, '='));
-    DBMS_OUTPUT.PUT_LINE('COMPLETE SQL CACHE TESTS FOR NOSQL COMPARISON');
-    DBMS_OUTPUT.PUT_LINE('=' || RPAD('=', 58, '='));
-    
-    DBMS_OUTPUT.PUT_LINE(CHR(10) || 'Testing October 2017');
-    DBMS_OUTPUT.PUT_LINE('Date range: ' || v_test_date || ' to ' || v_test_end_date);
-    DBMS_OUTPUT.PUT_LINE(RPAD('-', 50, '-'));
-    
-    -- Test 1: Cache Miss (first run)
-    DBMS_OUTPUT.PUT_LINE(CHR(10) || '1. Cache Miss (first run)');
-    get_cached_complex_analysis(
-        p_start_date => v_test_date,
-        p_end_date => v_test_end_date,
-        p_use_cache => TRUE
-    );
-    
-    -- Test 2: Cache Hit (second run)
-    DBMS_OUTPUT.PUT_LINE(CHR(10) || '2. Cache Hit (second run)');
-    get_cached_complex_analysis(
-        p_start_date => v_test_date,
-        p_end_date => v_test_end_date,
-        p_use_cache => TRUE
-    );
-    
-    -- Test 3: No Cache (baseline)
-    DBMS_OUTPUT.PUT_LINE(CHR(10) || '3. No Cache (baseline)');
-    get_cached_complex_analysis(
-        p_start_date => v_test_date,
-        p_end_date => v_test_end_date,
-        p_use_cache => FALSE
-    );
-    
-    DBMS_OUTPUT.PUT_LINE(CHR(10) || '=' || RPAD('=', 58, '='));
-    DBMS_OUTPUT.PUT_LINE('TESTS COMPLETE!');
-    
+    -- Loop through days
+    FOR i IN 0 .. p_total_days - 1 LOOP
+        DECLARE
+            v_current_date DATE := p_start_date + i;
+            v_start_str VARCHAR2(10) := TO_CHAR(v_current_date,'YYYY-MM-DD');
+            v_end_str VARCHAR2(10) := v_start_str;
+        BEGIN
+            -- Repeat each date query
+            FOR j IN 1 .. p_repeats_per_day LOOP
+
+                -- --- Start timing
+                v_start_time := SYSTIMESTAMP;
+
+                -- Generate cache key
+                v_cache_key := 'COMPLEX_' || v_start_str || '_TO_' || v_end_str;
+
+                -- Default cache usage
+                v_test_type := 'with_cache';
+                v_cache_status := 'MISS';
+
+                -- Check cache
+                SELECT COUNT(*) INTO v_cache_exists
+                FROM query_cache
+                WHERE cache_key = v_cache_key
+                  AND created_time > SYSTIMESTAMP - INTERVAL '30' MINUTE;
+
+                IF v_cache_exists > 0 THEN
+                    v_cache_status := 'HIT';
+                    v_test_type := 'with_cache';
+                    SELECT rows_returned INTO v_row_count
+                    FROM query_cache
+                    WHERE cache_key = v_cache_key;
+
+                    -- Update cache metadata
+                    UPDATE query_cache
+                    SET last_accessed = SYSTIMESTAMP,
+                        access_count = access_count + 1
+                    WHERE cache_key = v_cache_key;
+                ELSE
+                    -- MISS → execute query
+                    SELECT COUNT(*) INTO v_row_count
+                    FROM orders o
+                    JOIN customers c ON o.customer_id = c.customer_id
+                    JOIN payments p ON o.order_id = p.order_id
+                    WHERE o.order_status = 'delivered'
+                      AND o.order_purchase_timestamp >= v_current_date
+                      AND o.order_purchase_timestamp < v_current_date + 1;
+
+                    -- Store in cache
+                    INSERT INTO query_cache
+                    (cache_key, query_text, rows_returned, created_time, last_accessed, access_count)
+                    VALUES
+                    (v_cache_key,
+                     'Complex JOIN: delivered orders for ' || v_start_str,
+                     v_row_count,
+                     SYSTIMESTAMP,
+                     SYSTIMESTAMP,
+                     1);
+                END IF;
+
+                -- End timing
+                v_end_time := SYSTIMESTAMP;
+                v_response_ms := EXTRACT(SECOND FROM (v_end_time - v_start_time)) * 1000 +
+                                 EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 * 1000;
+
+                -- Record metrics
+                record_metrics(v_test_type, v_cache_status, v_start_str || '_to_' || v_end_str, v_response_ms, v_row_count);
+
+            END LOOP;
+        END;
+    END LOOP;
+
+    -- --- No-cache baseline
+    FOR i IN 0 .. p_total_days - 1 LOOP
+        DECLARE
+            v_current_date DATE := p_start_date + i;
+            v_start_str VARCHAR2(10) := TO_CHAR(v_current_date,'YYYY-MM-DD');
+            v_end_str VARCHAR2(10) := v_start_str;
+        BEGIN
+            FOR j IN 1 .. 5 LOOP  -- 5 runs per date without cache
+                v_start_time := SYSTIMESTAMP;
+                v_test_type := 'without_cache';
+                v_cache_status := 'N/A';
+
+                -- Execute query
+                SELECT COUNT(*) INTO v_row_count
+                FROM orders o
+                JOIN customers c ON o.customer_id = c.customer_id
+                JOIN payments p ON o.order_id = p.order_id
+                WHERE o.order_status = 'delivered'
+                  AND o.order_purchase_timestamp >= v_current_date
+                  AND o.order_purchase_timestamp < v_current_date + 1;
+
+                v_end_time := SYSTIMESTAMP;
+                v_response_ms := EXTRACT(SECOND FROM (v_end_time - v_start_time)) * 1000 +
+                                 EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 * 1000;
+
+                record_metrics(v_test_type, v_cache_status, v_start_str || '_to_' || v_end_str, v_response_ms, v_row_count);
+
+            END LOOP;
+        END;
+    END LOOP;
+
     COMMIT;
 END;
 /
 
--- Step 7: Check individual test results
+--Step 4: Clear old data (run before test)
+DELETE FROM cache_metrics;
+DELETE FROM query_cache;
+
+
+--Step 5: Run the procedure 
+BEGIN
+    get_cached_complex_analysis_batch(
+        p_start_date => TO_DATE('2017-10-01','YYYY-MM-DD'),
+        p_total_days => 10,          -- 10 different days
+        p_repeats_per_day => 10      -- repeat each query 10 times for cache hits
+    );
+END;
+/
+
+
+--Step 6: Check individual test results
 SELECT 
     test_type,
     cache_status,
     response_time_ms,
     rows_returned,
     TO_CHAR(run_time, 'HH24:MI:SS') as time_run
-FROM cache_metrics 
+FROM cache_metrics
 ORDER BY run_time;
 
--- Step 8: Calculate performance metrics (cache hit ratio, improvement)
+--Step 7: Aggregate performance metrics
 SELECT 
     'COMPLEX QUERIES' as query_category,
     COUNT(*) as total_queries,
     SUM(CASE WHEN cache_status = 'HIT' THEN 1 ELSE 0 END) as cache_hits,
     SUM(CASE WHEN cache_status = 'MISS' THEN 1 ELSE 0 END) as cache_misses,
-    ROUND(SUM(CASE WHEN cache_status = 'HIT' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as cache_hit_ratio_percent,
-    ROUND(AVG(CASE WHEN test_type = 'with_cache' THEN response_time_ms END), 2) as avg_with_cache_ms,
-    ROUND(AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END), 2) as avg_without_cache_ms,
-    ROUND(
-        (AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END) - 
-         AVG(CASE WHEN test_type = 'with_cache' THEN response_time_ms END)) * 100.0 /
-        AVG(CASE WHEN test_type = 'without_cache' THEN response_time_ms END),
-        2
-    ) as improvement_percent
+    SUM(CASE WHEN test_type = 'without_cache' THEN 1 ELSE 0 END) as no_cache_runs,
+    ROUND(SUM(CASE WHEN cache_status = 'HIT' THEN 1 ELSE 0 END) * 100.0 / 
+          NULLIF(SUM(CASE WHEN cache_status IN ('HIT','MISS') THEN 1 ELSE 0 END),0),2) as cache_hit_ratio_percent,
+    ROUND(AVG(CASE WHEN test_type='with_cache' AND cache_status='HIT' THEN response_time_ms END),2) as avg_hit_ms,
+    ROUND(AVG(CASE WHEN test_type='with_cache' AND cache_status='MISS' THEN response_time_ms END),2) as avg_miss_ms,
+    ROUND(AVG(CASE WHEN test_type='without_cache' THEN response_time_ms END),2) as avg_without_cache_ms
 FROM cache_metrics
-WHERE query_type = 'complex_join';
+WHERE query_type='complex_join';
+
+
